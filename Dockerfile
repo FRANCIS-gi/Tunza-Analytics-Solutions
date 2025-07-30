@@ -165,6 +165,9 @@ RUN mkdir -p \
       apache_superset.egg-info \
       requirements \
     && touch superset/static/version_info.json
+#
+COPY --chmod=755 superset/tunza_assets superset/static/assets
+#
 
 # Install Playwright and optionally setup headless browsers
 ARG INCLUDE_CHROMIUM="false"
