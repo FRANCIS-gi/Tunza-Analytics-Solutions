@@ -16,47 +16,42 @@
 #
 
 # -----------------------------------------------------------------------
-# We don't support docker compose for production environments.
-# If you choose to use this type of deployment make sure to
-# create you own docker environment file (docker/.env) with your own
-# unique random secure passwords and SECRET_KEY.
-#
-# For verbose logging during development:
-# - Set SUPERSET_LOG_LEVEL=debug in docker/.env-local for detailed Superset logs
+# Docker Compose for Superset aligned with superset_config.py
 # -----------------------------------------------------------------------
+
 x-superset-user: &superset-user root
 x-superset-volumes: &superset-volumes
-  # /app/pythonpath_docker will be appended to the PYTHONPATH in the final container
   - ./docker:/app/docker
   - ./superset:/app/superset
   - ./superset-frontend:/app/superset-frontend
   - superset_home:/app/superset_home
   - ./tests:/app/tests
   - /root/superset/tunza_images:/superset/tunza_images
+
 x-common-build: &common-build
   context: .
-  target: ${SUPERSET_BUILD_TARGET:-dev} # can use `dev` (default) or `lean`
+  target: prod
   cache_from:
     - apache/superset-cache:3.10-slim-trixie
   args:
-    DEV_MODE: "true"
-    INCLUDE_CHROMIUM: ${INCLUDE_CHROMIUM:-false}
-    INCLUDE_FIREFOX: ${INCLUDE_FIREFOX:-false}
-    BUILD_TRANSLATIONS: ${BUILD_TRANSLATIONS:-false}
-    LOAD_EXAMPLES_DUCKDB: ${LOAD_EXAMPLES_DUCKDB:-true}
+    DEV_MODE: "false"
+    INCLUDE_CHROMIUM: "false"
+    INCLUDE_FIREFOX: "false"
+    BUILD_TRANSLATIONS: "false"
+    LOAD_EXAMPLES_DUCKDB: "false"
 
 services:
   nginx:
     env_file:
-      - path: docker/.env # default
+      - path: docker/.env
         required: true
-      - path: docker/.env-local # optional override
+      - path: docker/.env-local
         required: false
     image: nginx:latest
     container_name: superset_nginx
     restart: unless-stopped
     ports:
-      - "80:80"
+      - "8085:80"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
@@ -74,9 +69,9 @@ services:
 
   db:
     env_file:
-      - path: docker/.env # default
+      - path: docker/.env
         required: true
-      - path: docker/.env-local # optional override
+      - path: docker/.env-local
         required: false
     image: postgres:16
     container_name: superset_db
@@ -89,19 +84,20 @@ services:
 
   superset:
     env_file:
-      - path: docker/.env # default
+      - path: docker/.env
         required: true
-      - path: docker/.env-local # optional override
+      - path: docker/.env-local
         required: false
     build:
       <<: *common-build
     container_name: superset_app
-    command: ["/app/docker/docker-bootstrap.sh", "app"]
+    command: >
+      gunicorn -w 4 -k gevent --timeout 120
+      -b 0.0.0.0:8088 "superset.app:create_app()"
     restart: unless-stopped
     ports:
-      - "0.0.0.0:8088:8088"   # binds to all host interfaces
-
-      - "0.0.0.0:8081:8081" # optional for cypress/dev mode
+      - "0.0.0.0:8088:8088"
+      - "0.0.0.0:8081:8081"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     user: *superset-user
@@ -111,33 +107,35 @@ services:
     volumes: *superset-volumes
     environment:
       SUPERSET__SQLALCHEMY_EXAMPLES_URI: "duckdb:////app/data/examples.duckdb"
+      SMTP_HOST: ${SMTP_HOST}
+      SMTP_USER: ${SMTP_USER}
+      SMTP_PASSWORD: ${SMTP_PASSWORD}
+      SMTP_PORT: 587
+      SMTP_STARTTLS: true
+      SMTP_SSL: false
+      SMTP_MAIL_FROM: "superset@tunzaanalytics.com"
+      EMAIL_NOTIFICATIONS: true
+      FEATURE_FLAGS: '{"ALERT_REPORTS": true}'
+      ALERT_REPORTS_NOTIFICATION_DRY_RUN: "true"
+      SUPERSET_APP_ROOT: "/"
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_CELERY_DB: 0
+      REDIS_RESULTS_DB: 1
 
   superset-websocket:
     container_name: superset_websocket
     build: ./superset-websocket
     ports:
-      - 8080:8080
+      - 8086:8080
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
       - redis
-    # Mount everything in superset-websocket into container and
-    # then exclude node_modules and dist with bogus volume mount.
-    # This is necessary because host and container need to have
-    # their own, separate versions of these files. .dockerignore
-    # does not seem to work when starting the service through
-    # docker compose.
-    #
-    # For example, node_modules may contain libs with native bindings.
-    # Those bindings need to be compiled for each OS and the container
-    # OS is not necessarily the same as host OS.
     volumes:
       - ./superset-websocket:/home/superset-websocket
       - /home/superset-websocket/node_modules
       - /home/superset-websocket/dist
-
-      # Mounting a config file that contains a dummy secret required to boot up.
-      # do not use this docker compose in production
       - ./docker/superset-websocket/config.json:/home/superset-websocket/config.json
     environment:
       - PORT=8080
@@ -151,9 +149,9 @@ services:
     container_name: superset_init
     command: ["/app/docker/docker-init.sh"]
     env_file:
-      - path: docker/.env # default
+      - path: docker/.env
         required: true
-      - path: docker/.env-local # optional override
+      - path: docker/.env-local
         required: false
     depends_on:
       db:
@@ -172,43 +170,38 @@ services:
       context: .
       target: superset-node
       args:
-        # This prevents building the frontend bundle since we'll mount local folder
-        # and build it on startup while firing docker-frontend.sh in dev mode, where
-        # it'll mount and watch local files and rebuild as you update them
         DEV_MODE: "true"
         BUILD_TRANSLATIONS: ${BUILD_TRANSLATIONS:-false}
     environment:
-      # set this to false if you have perf issues running the npm i; npm run dev in-docker
-      # if you do so, you have to run this manually on the host, which should perform better!
       BUILD_SUPERSET_FRONTEND_IN_DOCKER: true
       NPM_RUN_PRUNE: false
       SCARF_ANALYTICS: "${SCARF_ANALYTICS:-}"
-      # configuring the dev-server to use the host.docker.internal to connect to the backend
       superset: "http://superset:8088"
     ports:
-      - "127.0.0.1:9000:9000"  # exposing the dynamic webpack dev server
+      - "127.0.0.1:9000:9000"
     container_name: superset_node
     command: ["/app/docker/docker-frontend.sh"]
     env_file:
-      - path: docker/.env # default
+      - path: docker/.env
         required: true
-      - path: docker/.env-local # optional override
+      - path: docker/.env-local
         required: false
     volumes: *superset-volumes
 
   superset-worker:
     build:
       <<: *common-build
-    container_name: superset_worker
     command: ["/app/docker/docker-bootstrap.sh", "worker"]
     env_file:
-      - path: docker/.env # default
+      - path: docker/.env
         required: true
-      - path: docker/.env-local # optional override
+      - path: docker/.env-local
         required: false
     environment:
-      CELERYD_CONCURRENCY: 2
+      CELERYD_CONCURRENCY: 4
     restart: unless-stopped
+    deploy:
+      replicas: 3
     depends_on:
       superset-init:
         condition: service_completed_successfully
@@ -218,9 +211,6 @@ services:
       - "host.docker.internal:host-gateway"
     healthcheck:
       test: ["CMD-SHELL", "celery -A superset.tasks.celery_app:app inspect ping -d celery@$$HOSTNAME"]
-    # Bump memory limit if processing selenium / thumbnails on superset-worker
-    # mem_limit: 2038m
-    # mem_reservation: 128M
 
   superset-worker-beat:
     build:
@@ -228,9 +218,9 @@ services:
     container_name: superset_worker_beat
     command: ["/app/docker/docker-bootstrap.sh", "beat"]
     env_file:
-      - path: docker/.env # default
+      - path: docker/.env
         required: true
-      - path: docker/.env-local # optional override
+      - path: docker/.env-local
         required: false
     restart: unless-stopped
     depends_on:
@@ -246,9 +236,9 @@ services:
     container_name: superset_tests_worker
     command: ["/app/docker/docker-bootstrap.sh", "worker"]
     env_file:
-      - path: docker/.env # default
+      - path: docker/.env
         required: true
-      - path: docker/.env-local # optional override
+      - path: docker/.env-local
         required: false
     profiles:
       - optional

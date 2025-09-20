@@ -25,10 +25,13 @@ import os
 import sys
 
 from celery.schedules import crontab
-from flask_caching.backends.filesystemcache import FileSystemCache
+from cachelib.redis import RedisCache 
 
 logger = logging.getLogger()
 
+# ------------------------------
+# Database configuration
+# ------------------------------
 DATABASE_DIALECT = os.getenv("DATABASE_DIALECT")
 DATABASE_USER = os.getenv("DATABASE_USER")
 DATABASE_PASSWORD = os.getenv("DATABASE_PASSWORD")
@@ -60,13 +63,21 @@ SQLALCHEMY_EXAMPLES_URI = os.getenv(
     ),
 )
 
-
+# ------------------------------
+# Redis configuration
+# ------------------------------
 REDIS_HOST = os.getenv("REDIS_HOST", "redis")
 REDIS_PORT = os.getenv("REDIS_PORT", "6379")
 REDIS_CELERY_DB = os.getenv("REDIS_CELERY_DB", "0")
 REDIS_RESULTS_DB = os.getenv("REDIS_RESULTS_DB", "1")
 
-RESULTS_BACKEND = FileSystemCache("/app/superset_home/sqllab")
+# SQL Lab query results
+RESULTS_BACKEND = RedisCache(
+    host=REDIS_HOST,
+    port=int(REDIS_PORT),
+    key_prefix='superset_results',
+    db=int(REDIS_RESULTS_DB),
+)
 
 CACHE_CONFIG = {
     "CACHE_TYPE": "RedisCache",
@@ -80,18 +91,21 @@ DATA_CACHE_CONFIG = CACHE_CONFIG
 THUMBNAIL_CACHE_CONFIG = CACHE_CONFIG
 
 
+# ------------------------------
+# Celery configuration
+# ------------------------------
 class CeleryConfig:
     broker_url = f"redis://{REDIS_HOST}:{REDIS_PORT}/{REDIS_CELERY_DB}"
+    result_backend = f"redis://{REDIS_HOST}:{REDIS_PORT}/{REDIS_RESULTS_DB}"
     imports = (
         "superset.sql_lab",
         "superset.tasks.scheduler",
         "superset.tasks.thumbnails",
         "superset.tasks.cache",
     )
-    result_backend = f"redis://{REDIS_HOST}:{REDIS_PORT}/{REDIS_RESULTS_DB}"
-    worker_concurrency = 4  # or 6 if mostly dashboard queries
+    worker_concurrency = 4
     worker_prefetch_multiplier = 1
-    task_acks_late = True     # ensures tasks aren’t lost if a worker crashes
+    task_acks_late = True
     beat_schedule = {
         "reports.scheduler": {
             "task": "reports.scheduler",
@@ -102,21 +116,38 @@ class CeleryConfig:
             "schedule": crontab(minute=10, hour=0),
         },
     }
-ENABLE_UI_THEME_ADMINISTRATION = True
 
 CELERY_CONFIG = CeleryConfig
 
+
 FEATURE_FLAGS = {"ALERT_REPORTS": True}
 ALERT_REPORTS_NOTIFICATION_DRY_RUN = True
-WEBDRIVER_BASEURL = f"http://superset_app{os.environ.get('SUPERSET_APP_ROOT', '/')}/"  # When using docker compose baseurl should be http://superset_nginx{ENV{BASEPATH}}/  # noqa: E501
-# The base URL for the email report hyperlinks.
-WEBDRIVER_BASEURL_USER_FRIENDLY = (
-    f"http://localhost:8888/{os.environ.get('SUPERSET_APP_ROOT', '/')}/"
-)
-SQLLAB_CTAS_NO_LIMIT = True
 
 log_level_text = os.getenv("SUPERSET_LOG_LEVEL", "INFO")
 LOG_LEVEL = getattr(logging, log_level_text.upper(), logging.INFO)
+
+# ------------------------------
+# SMTP / Email
+# ------------------------------
+EMAIL_NOTIFICATIONS = True
+SMTP_HOST = os.getenv("SMTP_HOST")
+SMTP_STARTTLS = True
+SMTP_SSL = False
+SMTP_USER = os.getenv("SMTP_USER")
+SMTP_PORT = 587
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
+SMTP_MAIL_FROM = "superset@tunzaanalytics.com"
+
+WEBDRIVER_BASEURL = "http://superset_nginx:8085/"
+app_root = os.environ.get('SUPERSET_APP_ROOT', '/').strip('/')
+WEBDRIVER_BASEURL_USER_FRIENDLY = (
+    f"http://localhost:8888/{app_root}/" if app_root else "http://localhost:8888/"
+)
+
+SQLLAB_CTAS_NO_LIMIT = True
+
+# log_level_text = os.getenv("SUPERSET_LOG_LEVEL", "INFO")
+# LOG_LEVEL = getattr(logging, log_level_text.upper(), logging.INFO)
 
 if os.getenv("CYPRESS_CONFIG") == "true":
     # When running the service as a cypress backend, we need to import the config
@@ -144,14 +175,16 @@ try:
 except ImportError:
     logger.info("Using default Docker config...")
 
-CACHE_CONFIG = {
-    'CACHE_TYPE': 'RedisCache',
-    'CACHE_DEFAULT_TIMEOUT': 300,
-    'CACHE_KEY_PREFIX': 'superset_',
-    'CACHE_REDIS_URL': 'redis://superset_cache:6379/0',
-}
-DATA_CACHE_CONFIG = CACHE_CONFIG
-THUMBNAIL_CACHE_CONFIG = CACHE_CONFIG
+# CACHE_CONFIG = {
+#     'CACHE_TYPE': 'RedisCache',
+#     'CACHE_DEFAULT_TIMEOUT': 300,
+#     'CACHE_KEY_PREFIX': 'superset_',
+#    "CACHE_REDIS_URL": f"redis://{REDIS_HOST}:{REDIS_PORT}/{REDIS_RESULTS_DB}",
+# }
+#    "CACHE_REDIS_HOST": REDIS_HOST,
+#    "CACHE_REDIS_PORT": REDIS_PORT,
+#    "CACHE_REDIS_DB": REDIS_RESULTS_DB,
+# THUMBNAIL_CACHE_CONFIG = CACHE_CONFIG
 
 APP_NAME = "Tunza Analytics Solutions"
 
@@ -162,4 +195,4 @@ LOGO_TARGET_PATH = "https://www.tunzaanalytics.com"
 FAVICONS = [
      {"href": "superset/tunza_images/favicon_io/favicon.ico"}
 ]
-SUPERSET_ROW_LIMIT = 10000
+SUPERSET_ROW_LIMIT = 5000
